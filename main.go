@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -38,7 +39,7 @@ const (
 var (
 	errXInputUnavailable  = errors.New("xinput backend unavailable")
 	errEvdevUnavailable   = errors.New("evdev backend unavailable")
-	errWindowsUnavailable = errors.New("windows host backend unavailable")
+	errWindowsUnavailable = errors.New("windows backend unavailable")
 )
 
 var defaultDigits = []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}
@@ -440,15 +441,17 @@ func (w *hotkeyWatcher) Watch(ctx context.Context, out chan<- runtimeBinding) er
 	case "xinput":
 		return w.watchXInput(ctx, out)
 	case "windows":
-		return w.watchWindowsHost(ctx, out)
+		return w.watchWindows(ctx, out)
 	case "windows-host":
-		return w.watchWindowsHost(ctx, out)
+		return w.watchWindows(ctx, out)
 	}
 
-	if runningUnderWSL() {
-		if err := w.watchWindowsHost(ctx, out); err == nil {
+	if windowsBackendEnabled(runtime.GOOS == "windows", runningUnderWSL()) {
+		if err := w.watchWindows(ctx, out); err == nil {
 			return nil
 		} else if !errors.Is(err, errWindowsUnavailable) {
+			return err
+		} else if runtime.GOOS == "windows" {
 			return err
 		}
 	}
@@ -462,9 +465,9 @@ func (w *hotkeyWatcher) Watch(ctx context.Context, out chan<- runtimeBinding) er
 	return w.watchEvdev(ctx, out)
 }
 
-func (w *hotkeyWatcher) watchWindowsHost(ctx context.Context, out chan<- runtimeBinding) error {
-	if !runningUnderWSL() {
-		return fmt.Errorf("%w: WSL environment not detected", errWindowsUnavailable)
+func (w *hotkeyWatcher) watchWindows(ctx context.Context, out chan<- runtimeBinding) error {
+	if !windowsBackendEnabled(runtime.GOOS == "windows", runningUnderWSL()) {
+		return fmt.Errorf("%w: Windows or WSL environment not detected", errWindowsUnavailable)
 	}
 	if !exists("powershell.exe") {
 		return fmt.Errorf("%w: powershell.exe not found in PATH", errWindowsUnavailable)
@@ -480,7 +483,7 @@ func (w *hotkeyWatcher) watchWindowsHost(ctx context.Context, out chan<- runtime
 		}
 		id := idx + 1
 		bindingByID[id] = binding
-		script.WriteString(fmt.Sprintf(windowsHostRegisterTemplate, id, mods, vk, quotePowerShellSingle(binding.Hotkey), id))
+		script.WriteString(fmt.Sprintf(windowsHostRegisterTemplate, id, mods, vk, quotePowerShellSingle(binding.Hotkey), id, id, mods, vk))
 	}
 	script.WriteString(windowsHostWatcherScriptTail)
 
@@ -576,6 +579,7 @@ func (w *hotkeyWatcher) watchXInputByDeviceID(ctx context.Context, out chan<- ru
 
 	pressedCount := map[int]int{}
 	active := make([]bool, len(w.bindings))
+	armed := make([]bool, len(w.bindings))
 	last := make([]time.Time, len(w.bindings))
 	var tail []string
 
@@ -589,7 +593,7 @@ func (w *hotkeyWatcher) watchXInputByDeviceID(ctx context.Context, out chan<- ru
 		}
 
 		updatePressedCountX11(pressedCount, code, eventKind)
-		for _, binding := range w.evaluateX11(pressedCount, active, last) {
+		for _, binding := range w.evaluateX11(pressedCount, active, armed, last) {
 			select {
 			case out <- binding:
 			case <-ctx.Done():
@@ -633,6 +637,7 @@ func (w *hotkeyWatcher) watchXInputXI2Root(ctx context.Context, out chan<- runti
 
 	pressedCount := map[int]int{}
 	active := make([]bool, len(w.bindings))
+	armed := make([]bool, len(w.bindings))
 	last := make([]time.Time, len(w.bindings))
 	var tail []string
 	eventKind := 0
@@ -668,7 +673,7 @@ func (w *hotkeyWatcher) watchXInputXI2Root(ctx context.Context, out chan<- runti
 		}
 
 		updatePressedCountX11(pressedCount, code, eventKind)
-		for _, binding := range w.evaluateX11(pressedCount, active, last) {
+		for _, binding := range w.evaluateX11(pressedCount, active, armed, last) {
 			select {
 			case out <- binding:
 			case <-ctx.Done():
@@ -726,6 +731,7 @@ func (w *hotkeyWatcher) watchEvdev(ctx context.Context, out chan<- runtimeBindin
 	var stateMu sync.Mutex
 	pressedCount := map[uint16]int{}
 	active := make([]bool, len(w.bindings))
+	armed := make([]bool, len(w.bindings))
 	last := make([]time.Time, len(w.bindings))
 
 	for _, in := range inputs {
@@ -747,7 +753,7 @@ func (w *hotkeyWatcher) watchEvdev(ctx context.Context, out chan<- runtimeBindin
 
 				stateMu.Lock()
 				updatePressedCountEvdev(pressedCount, event.Code, event.Value)
-				fired := w.evaluateEvdev(pressedCount, active, last)
+				fired := w.evaluateEvdev(pressedCount, active, armed, last)
 				stateMu.Unlock()
 
 				for _, binding := range fired {
@@ -778,16 +784,20 @@ func (w *hotkeyWatcher) watchEvdev(ctx context.Context, out chan<- runtimeBindin
 	}
 }
 
-func (w *hotkeyWatcher) evaluateX11(pressedCount map[int]int, active []bool, last []time.Time) []runtimeBinding {
+func (w *hotkeyWatcher) evaluateX11(pressedCount map[int]int, active, armed []bool, last []time.Time) []runtimeBinding {
 	now := time.Now()
 	fired := make([]runtimeBinding, 0, 1)
 	for i, binding := range w.bindings {
 		nowActive := bindingActiveX11(binding.Combo, pressedCount)
-		activate := nowActive && !active[i]
+		if nowActive && !active[i] {
+			armed[i] = true
+		}
+		activate := !nowActive && active[i] && armed[i]
 		active[i] = nowActive
 		if !activate {
 			continue
 		}
+		armed[i] = false
 		if !last[i].IsZero() && now.Sub(last[i]) < activationDebounce {
 			continue
 		}
@@ -797,16 +807,20 @@ func (w *hotkeyWatcher) evaluateX11(pressedCount map[int]int, active []bool, las
 	return fired
 }
 
-func (w *hotkeyWatcher) evaluateEvdev(pressedCount map[uint16]int, active []bool, last []time.Time) []runtimeBinding {
+func (w *hotkeyWatcher) evaluateEvdev(pressedCount map[uint16]int, active, armed []bool, last []time.Time) []runtimeBinding {
 	now := time.Now()
 	fired := make([]runtimeBinding, 0, 1)
 	for i, binding := range w.bindings {
 		nowActive := bindingActiveEvdev(binding.Combo, pressedCount)
-		activate := nowActive && !active[i]
+		if nowActive && !active[i] {
+			armed[i] = true
+		}
+		activate := !nowActive && active[i] && armed[i]
 		active[i] = nowActive
 		if !activate {
 			continue
 		}
+		armed[i] = false
 		if !last[i].IsZero() && now.Sub(last[i]) < activationDebounce {
 			continue
 		}
@@ -921,13 +935,16 @@ func injectText(text string) error {
 
 func resolveOutputMethod(text string) (string, error) {
 	method := strings.ToLower(strings.TrimSpace(os.Getenv("HOTKEY_PASTE_OUTPUT_METHOD")))
-	return resolveOutputMethodWith(text, method, runningUnderWSL(), exists)
+	return resolveOutputMethodWith(text, method, runningUnderWSL(), runtime.GOOS == "windows", exists)
 }
 
-func resolveOutputMethodWith(text, method string, underWSL bool, commandExists func(string) bool) (string, error) {
+func resolveOutputMethodWith(text, method string, underWSL, onWindows bool, commandExists func(string) bool) (string, error) {
 	if method == "" || method == "auto" {
-		if underWSL && commandExists("powershell.exe") {
+		if windowsBackendEnabled(onWindows, underWSL) && commandExists("powershell.exe") {
 			return "windows", nil
+		}
+		if onWindows {
+			return "", errors.New("no supported paste backend found; install powershell.exe")
 		}
 		if utf8.RuneCountInString(text) > largeSnippetRunes {
 			if _, err := resolveClipboardBackendWith(commandExists); err == nil {
@@ -964,8 +981,8 @@ func resolveOutputMethodWith(text, method string, underWSL bool, commandExists f
 		}
 		return method, nil
 	case "windows":
-		if !underWSL {
-			return "", errors.New("windows output method requires WSL")
+		if !windowsBackendEnabled(onWindows, underWSL) {
+			return "", errors.New("windows output method requires Windows or WSL")
 		}
 		if !commandExists("powershell.exe") {
 			return "", errors.New("powershell.exe not found in PATH")
@@ -1113,8 +1130,8 @@ func resolveClipboardBackendWith(commandExists func(string) bool) (clipboardBack
 }
 
 func typeViaWindowsHost(text string) error {
-	if !runningUnderWSL() {
-		return errors.New("windows output method requires WSL")
+	if !windowsBackendEnabled(runtime.GOOS == "windows", runningUnderWSL()) {
+		return errors.New("windows output method requires Windows or WSL")
 	}
 	if !exists("powershell.exe") {
 		return errors.New("powershell.exe not found in PATH")
@@ -1494,6 +1511,10 @@ func runningUnderWSLFrom(wslDistro, wslInterop, kernelRelease, procVersion strin
 	return strings.Contains(release, "microsoft") || strings.Contains(version, "microsoft")
 }
 
+func windowsBackendEnabled(onWindows, underWSL bool) bool {
+	return onWindows || underWSL
+}
+
 func readProcFile(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1606,9 +1627,32 @@ public static class HotkeyNative {
 
     [DllImport("user32.dll")]
     public static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
 }
 "@
 $registered = New-Object System.Collections.Generic.List[int]
+$hotkeys = @{}
+
+function Test-KeyDown([uint32]$vk) {
+    return (([HotkeyNative]::GetAsyncKeyState([int]$vk) -band 0x8000) -ne 0)
+}
+
+function Wait-HotkeyRelease([uint32]$mods, [uint32]$vk) {
+    while ($true) {
+        $down = $false
+        if ((($mods -band 0x0002) -ne 0) -and (Test-KeyDown 0x11)) { $down = $true }
+        if ((($mods -band 0x0004) -ne 0) -and (Test-KeyDown 0x10)) { $down = $true }
+        if ((($mods -band 0x0001) -ne 0) -and (Test-KeyDown 0x12)) { $down = $true }
+        if ((($mods -band 0x0008) -ne 0) -and ((Test-KeyDown 0x5B) -or (Test-KeyDown 0x5C))) { $down = $true }
+        if (Test-KeyDown $vk) { $down = $true }
+        if (-not $down) {
+            break
+        }
+        Start-Sleep -Milliseconds 10
+    }
+}
 try {
 `
 
@@ -1617,12 +1661,18 @@ const windowsHostRegisterTemplate = `    if (-not [HotkeyNative]::RegisterHotKey
         throw ('failed to register %s (win32=' + $code + ')')
     }
     $registered.Add(%d) | Out-Null
+    $hotkeys[%d] = @{ Mods = [uint32]%d; Vk = [uint32]%d }
 `
 
 const windowsHostWatcherScriptTail = `    $msg = New-Object HotkeyNative+MSG
     while ([HotkeyNative]::GetMessage([ref]$msg, [IntPtr]::Zero, 0, 0) -gt 0) {
         if ($msg.message -eq 0x0312) {
-            [Console]::Out.WriteLine(('HOTKEY:{0}' -f $msg.wParam.ToUInt32()))
+            $id = [int]$msg.wParam.ToUInt32()
+            if ($hotkeys.ContainsKey($id)) {
+                $entry = $hotkeys[$id]
+                Wait-HotkeyRelease $entry.Mods $entry.Vk
+            }
+            [Console]::Out.WriteLine(('HOTKEY:{0}' -f $id))
         }
     }
 } finally {

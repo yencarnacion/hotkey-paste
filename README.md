@@ -1,6 +1,6 @@
 # hotkey-paste
 
-`hotkey-paste` is a small background hotkey tool written in Go. On native Linux it behaves like before: start it from the CLI, it watches `Ctrl+Alt+1` through `Ctrl+Alt+0`, reads the text file associated with the hotkey, and injects that text into the currently focused application until you stop it with `Ctrl-C`. When you run the same Linux binary inside WSL, it can register the hotkeys with the Windows host and paste into the focused Windows application.
+`hotkey-paste` is a small background hotkey tool written in Go. On native Linux it behaves like before: start it from the CLI, it watches `Ctrl+Alt+1` through `Ctrl+Alt+0`, reads the text file associated with the hotkey, and injects that text into the currently focused application until you stop it with `Ctrl-C`. In WSL or on native Windows, it can register global hotkeys through `powershell.exe` and paste into the focused Windows application.
 
 ## Requirements
 
@@ -8,11 +8,11 @@
 - One hotkey backend:
   - `xinput` on X11 sessions
   - `/dev/input/event*` fallback if `xinput` is unavailable
-  - `powershell.exe` when running inside WSL and using the Windows host backend
+  - `powershell.exe` on WSL or native Windows
 - One typing backend:
   - `wtype` for Wayland-compatible typing
   - `xdotool` for X11 typing
-  - `powershell.exe` for clipboard paste into Windows apps from WSL
+  - `powershell.exe` for clipboard paste into Windows apps from WSL or native Windows
 - Optional clipboard helpers for large snippets:
   - `wl-copy` and `wl-paste` on Wayland
   - `xclip` on X11
@@ -50,10 +50,10 @@ Stop it with `Ctrl-C`.
 - Hotkeys are no longer captured with an X11 key grab. The program now follows the reference project pattern and watches keyboard events through `xinput`, with `/dev/input/event*` as fallback.
 - If the fallback backend is needed, your user may need read access to `/dev/input/event*` devices.
 - Large snippets automatically use clipboard paste when the required clipboard tools are available. Smaller snippets use `wtype` or `xdotool`.
-- Inside WSL, the default auto-detection prefers a Windows-host backend through `powershell.exe`. That lets the Linux process register global Windows hotkeys and paste into the active Windows app without changing native Linux behavior.
+- Inside WSL, and on native Windows, the default auto-detection prefers the `powershell.exe` backend for global Windows hotkeys and paste.
 - `HOTKEY_PASTE_HOTKEY_BACKEND` can be set to `xinput`, `evdev`, or `windows`.
 - `HOTKEY_PASTE_OUTPUT_METHOD` can be set to `auto`, `windows`, `clipboard`, `wtype`, or `xdotool`.
-- The WSL backend uses the Windows clipboard and sends `Ctrl+V` after the hotkey fires. It restores the previous text clipboard contents on a best-effort basis.
+- The Windows backend uses the Windows clipboard and sends `Ctrl+V` after the hotkey fires. It restores the previous text clipboard contents on a best-effort basis.
 
 ## Configuration
 

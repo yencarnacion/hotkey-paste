@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestParseHotkeyCtrlAltDigit(t *testing.T) {
@@ -58,6 +59,49 @@ func TestBindingActiveEvdev(t *testing.T) {
 	}
 }
 
+func TestEvaluateEvdevFiresOnRelease(t *testing.T) {
+	combo, err := parseBinding("Ctrl+Shift+2")
+	if err != nil {
+		t.Fatalf("parseBinding returned error: %v", err)
+	}
+
+	w := hotkeyWatcher{
+		bindings: []runtimeBinding{
+			{Hotkey: "Ctrl+Shift+2", Combo: combo},
+		},
+	}
+
+	pressed := map[uint16]int{}
+	active := make([]bool, 1)
+	armed := make([]bool, 1)
+	last := make([]time.Time, 1)
+
+	updatePressedCountEvdev(pressed, 29, 1)
+	if got := w.evaluateEvdev(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("unexpected activation before full combo: %#v", got)
+	}
+
+	updatePressedCountEvdev(pressed, 42, 1)
+	if got := w.evaluateEvdev(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("unexpected activation before trigger press: %#v", got)
+	}
+
+	updatePressedCountEvdev(pressed, 3, 1)
+	if got := w.evaluateEvdev(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("expected no activation while combo is still held, got %#v", got)
+	}
+
+	updatePressedCountEvdev(pressed, 3, 0)
+	got := w.evaluateEvdev(pressed, active, armed, last)
+	if len(got) != 1 || got[0].Hotkey != "Ctrl+Shift+2" {
+		t.Fatalf("expected release activation for hotkey, got %#v", got)
+	}
+
+	if got := w.evaluateEvdev(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("unexpected repeated activation after release: %#v", got)
+	}
+}
+
 func TestRunningUnderWSLFrom(t *testing.T) {
 	if !runningUnderWSLFrom("Ubuntu", "", "", "") {
 		t.Fatal("expected WSL_DISTRO_NAME to mark WSL environment")
@@ -88,7 +132,23 @@ func TestResolveOutputMethodWithPrefersWindowsInWSL(t *testing.T) {
 	t.Setenv("WAYLAND_DISPLAY", "")
 	t.Setenv("DISPLAY", "")
 
-	method, err := resolveOutputMethodWith("hello", "auto", true, func(name string) bool {
+	method, err := resolveOutputMethodWith("hello", "auto", true, false, func(name string) bool {
+		return name == "powershell.exe"
+	})
+	if err != nil {
+		t.Fatalf("resolveOutputMethodWith returned error: %v", err)
+	}
+	if method != "windows" {
+		t.Fatalf("unexpected method: %q", method)
+	}
+}
+
+func TestResolveOutputMethodWithPrefersWindowsOnNativeWindows(t *testing.T) {
+	t.Setenv("XDG_SESSION_TYPE", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", "")
+
+	method, err := resolveOutputMethodWith("hello", "auto", false, true, func(name string) bool {
 		return name == "powershell.exe"
 	})
 	if err != nil {
