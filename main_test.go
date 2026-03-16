@@ -132,7 +132,7 @@ func TestResolveOutputMethodWithPrefersWindowsInWSL(t *testing.T) {
 	t.Setenv("WAYLAND_DISPLAY", "")
 	t.Setenv("DISPLAY", "")
 
-	method, err := resolveOutputMethodWith("hello", "auto", true, false, func(name string) bool {
+	method, err := resolveOutputMethodWith("hello", "auto", true, false, true, func(name string) bool {
 		return name == "powershell.exe"
 	})
 	if err != nil {
@@ -148,7 +148,7 @@ func TestResolveOutputMethodWithPrefersWindowsOnNativeWindows(t *testing.T) {
 	t.Setenv("WAYLAND_DISPLAY", "")
 	t.Setenv("DISPLAY", "")
 
-	method, err := resolveOutputMethodWith("hello", "auto", false, true, func(name string) bool {
+	method, err := resolveOutputMethodWith("hello", "auto", false, true, true, func(name string) bool {
 		return name == "powershell.exe"
 	})
 	if err != nil {

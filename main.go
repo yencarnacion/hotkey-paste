@@ -44,6 +44,12 @@ var (
 
 var defaultDigits = []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}
 
+var windowsShellPathCandidates = []string{
+	"/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+	"/mnt/c/Program Files/PowerShell/7/pwsh.exe",
+	"/mnt/c/Program Files/PowerShell/6/pwsh.exe",
+}
+
 type config struct {
 	Bindings []binding `json:"bindings"`
 }
@@ -462,15 +468,21 @@ func (w *hotkeyWatcher) Watch(ctx context.Context, out chan<- runtimeBinding) er
 		return err
 	}
 
+	if shouldFallbackToWindowsBackend(runtime.GOOS == "windows", runningUnderWSL(), windowsShellAvailable()) {
+		if err := w.watchWindows(ctx, out); err == nil {
+			return nil
+		} else if !errors.Is(err, errWindowsUnavailable) {
+			return err
+		}
+	}
+
 	return w.watchEvdev(ctx, out)
 }
 
 func (w *hotkeyWatcher) watchWindows(ctx context.Context, out chan<- runtimeBinding) error {
-	if !windowsBackendEnabled(runtime.GOOS == "windows", runningUnderWSL()) {
-		return fmt.Errorf("%w: Windows or WSL environment not detected", errWindowsUnavailable)
-	}
-	if !exists("powershell.exe") {
-		return fmt.Errorf("%w: powershell.exe not found in PATH", errWindowsUnavailable)
+	shellPath, err := findWindowsShellExecutable()
+	if err != nil {
+		return fmt.Errorf("%w: %v", errWindowsUnavailable, err)
 	}
 
 	var script strings.Builder
@@ -483,11 +495,11 @@ func (w *hotkeyWatcher) watchWindows(ctx context.Context, out chan<- runtimeBind
 		}
 		id := idx + 1
 		bindingByID[id] = binding
-		script.WriteString(fmt.Sprintf(windowsHostRegisterTemplate, id, mods, vk, quotePowerShellSingle(binding.Hotkey), id, id, mods, vk))
+		script.WriteString(fmt.Sprintf(windowsHostRegisterTemplate, id, mods, vk, id, id, id, mods, vk))
 	}
 	script.WriteString(windowsHostWatcherScriptTail)
 
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encodePowerShell(script.String()))
+	cmd := exec.CommandContext(ctx, shellPath, "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encodePowerShell(script.String()))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("%w: %v", errWindowsUnavailable, err)
@@ -935,16 +947,16 @@ func injectText(text string) error {
 
 func resolveOutputMethod(text string) (string, error) {
 	method := strings.ToLower(strings.TrimSpace(os.Getenv("HOTKEY_PASTE_OUTPUT_METHOD")))
-	return resolveOutputMethodWith(text, method, runningUnderWSL(), runtime.GOOS == "windows", exists)
+	return resolveOutputMethodWith(text, method, runningUnderWSL(), runtime.GOOS == "windows", windowsShellAvailable(), exists)
 }
 
-func resolveOutputMethodWith(text, method string, underWSL, onWindows bool, commandExists func(string) bool) (string, error) {
+func resolveOutputMethodWith(text, method string, underWSL, onWindows, hasWindowsShell bool, commandExists func(string) bool) (string, error) {
 	if method == "" || method == "auto" {
-		if windowsBackendEnabled(onWindows, underWSL) && commandExists("powershell.exe") {
+		if shouldAutoUseWindowsBackend(onWindows, underWSL, hasWindowsShell) {
 			return "windows", nil
 		}
 		if onWindows {
-			return "", errors.New("no supported paste backend found; install powershell.exe")
+			return "", errors.New("no supported paste backend found; install powershell.exe or pwsh.exe")
 		}
 		if utf8.RuneCountInString(text) > largeSnippetRunes {
 			if _, err := resolveClipboardBackendWith(commandExists); err == nil {
@@ -981,11 +993,11 @@ func resolveOutputMethodWith(text, method string, underWSL, onWindows bool, comm
 		}
 		return method, nil
 	case "windows":
-		if !windowsBackendEnabled(onWindows, underWSL) {
-			return "", errors.New("windows output method requires Windows or WSL")
+		if !shouldAutoUseWindowsBackend(onWindows, underWSL, hasWindowsShell) && !windowsBackendEnabled(onWindows, underWSL) {
+			return "", errors.New("windows output method requires Windows, WSL, or a reachable Windows PowerShell from a headless Linux session")
 		}
-		if !commandExists("powershell.exe") {
-			return "", errors.New("powershell.exe not found in PATH")
+		if !hasWindowsShell {
+			return "", errors.New("powershell.exe or pwsh.exe not found")
 		}
 		return method, nil
 	case "wtype":
@@ -1130,14 +1142,12 @@ func resolveClipboardBackendWith(commandExists func(string) bool) (clipboardBack
 }
 
 func typeViaWindowsHost(text string) error {
-	if !windowsBackendEnabled(runtime.GOOS == "windows", runningUnderWSL()) {
-		return errors.New("windows output method requires Windows or WSL")
-	}
-	if !exists("powershell.exe") {
-		return errors.New("powershell.exe not found in PATH")
+	shellPath, err := findWindowsShellExecutable()
+	if err != nil {
+		return err
 	}
 
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encodePowerShell(windowsHostPasteScript))
+	cmd := exec.Command(shellPath, "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encodePowerShell(windowsHostPasteScript))
 	cmd.Stdin = strings.NewReader(text)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1498,7 +1508,7 @@ func runningUnderWSL() bool {
 	if runningUnderWSLFrom(os.Getenv("WSL_DISTRO_NAME"), os.Getenv("WSL_INTEROP"), readProcFile("/proc/sys/kernel/osrelease"), readProcFile("/proc/version")) {
 		return true
 	}
-	return false
+	return fileExists("/proc/sys/fs/binfmt_misc/WSLInterop") || fileExists("/run/WSL")
 }
 
 func runningUnderWSLFrom(wslDistro, wslInterop, kernelRelease, procVersion string) bool {
@@ -1513,6 +1523,47 @@ func runningUnderWSLFrom(wslDistro, wslInterop, kernelRelease, procVersion strin
 
 func windowsBackendEnabled(onWindows, underWSL bool) bool {
 	return onWindows || underWSL
+}
+
+func shouldFallbackToWindowsBackend(onWindows, underWSL, hasWindowsShell bool) bool {
+	return !windowsBackendEnabled(onWindows, underWSL) && hasWindowsShell && headlessLinuxSession()
+}
+
+func shouldAutoUseWindowsBackend(onWindows, underWSL, hasWindowsShell bool) bool {
+	if !hasWindowsShell {
+		return false
+	}
+	return windowsBackendEnabled(onWindows, underWSL) || headlessLinuxSession()
+}
+
+func headlessLinuxSession() bool {
+	return runtime.GOOS != "windows" &&
+		strings.TrimSpace(os.Getenv("DISPLAY")) == "" &&
+		strings.TrimSpace(os.Getenv("WAYLAND_DISPLAY")) == ""
+}
+
+func windowsShellAvailable() bool {
+	_, err := findWindowsShellExecutable()
+	return err == nil
+}
+
+func findWindowsShellExecutable() (string, error) {
+	for _, name := range []string{"powershell.exe", "pwsh.exe"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	for _, path := range windowsShellPathCandidates {
+		if fileExists(path) {
+			return path, nil
+		}
+	}
+	return "", errors.New("powershell.exe or pwsh.exe not found in PATH or common WSL mount locations")
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func readProcFile(path string) string {
@@ -1582,10 +1633,6 @@ func windowsVirtualKey(token string) (uint32, error) {
 	default:
 		return 0, fmt.Errorf("unsupported key %q", token)
 	}
-}
-
-func quotePowerShellSingle(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func encodePowerShell(script string) string {
@@ -1658,7 +1705,7 @@ try {
 
 const windowsHostRegisterTemplate = `    if (-not [HotkeyNative]::RegisterHotKey([IntPtr]::Zero, %d, %d, %d)) {
         $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw ('failed to register %s (win32=' + $code + ')')
+        throw ('failed to register hotkey id %d (win32=' + $code + ')')
     }
     $registered.Add(%d) | Out-Null
     $hotkeys[%d] = @{ Mods = [uint32]%d; Vk = [uint32]%d }
