@@ -59,7 +59,7 @@ func TestBindingActiveEvdev(t *testing.T) {
 	}
 }
 
-func TestEvaluateEvdevFiresOnRelease(t *testing.T) {
+func TestEvaluateEvdevFiresAfterFullRelease(t *testing.T) {
 	combo, err := parseBinding("Ctrl+Shift+2")
 	if err != nil {
 		t.Fatalf("parseBinding returned error: %v", err)
@@ -92,13 +92,72 @@ func TestEvaluateEvdevFiresOnRelease(t *testing.T) {
 	}
 
 	updatePressedCountEvdev(pressed, 3, 0)
+	if got := w.evaluateEvdev(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("expected no activation while modifiers are still held, got %#v", got)
+	}
+
+	updatePressedCountEvdev(pressed, 42, 0)
+	if got := w.evaluateEvdev(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("expected no activation while ctrl is still held, got %#v", got)
+	}
+
+	updatePressedCountEvdev(pressed, 29, 0)
 	got := w.evaluateEvdev(pressed, active, armed, last)
 	if len(got) != 1 || got[0].Hotkey != "Ctrl+Shift+2" {
-		t.Fatalf("expected release activation for hotkey, got %#v", got)
+		t.Fatalf("expected activation after full release, got %#v", got)
 	}
 
 	if got := w.evaluateEvdev(pressed, active, armed, last); len(got) != 0 {
 		t.Fatalf("unexpected repeated activation after release: %#v", got)
+	}
+}
+
+func TestEvaluateX11FiresAfterFullRelease(t *testing.T) {
+	combo, err := parseBinding("Ctrl+Shift+2")
+	if err != nil {
+		t.Fatalf("parseBinding returned error: %v", err)
+	}
+
+	w := hotkeyWatcher{
+		bindings: []runtimeBinding{
+			{Hotkey: "Ctrl+Shift+2", Combo: combo},
+		},
+	}
+
+	pressed := map[int]int{}
+	active := make([]bool, 1)
+	armed := make([]bool, 1)
+	last := make([]time.Time, 1)
+
+	updatePressedCountX11(pressed, x11Code(29), 1)
+	if got := w.evaluateX11(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("unexpected activation before full combo: %#v", got)
+	}
+
+	updatePressedCountX11(pressed, x11Code(42), 1)
+	if got := w.evaluateX11(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("unexpected activation before trigger press: %#v", got)
+	}
+
+	updatePressedCountX11(pressed, x11Code(3), 1)
+	if got := w.evaluateX11(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("expected no activation while combo is still held, got %#v", got)
+	}
+
+	updatePressedCountX11(pressed, x11Code(3), -1)
+	if got := w.evaluateX11(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("expected no activation while modifiers are still held, got %#v", got)
+	}
+
+	updatePressedCountX11(pressed, x11Code(42), -1)
+	if got := w.evaluateX11(pressed, active, armed, last); len(got) != 0 {
+		t.Fatalf("expected no activation while ctrl is still held, got %#v", got)
+	}
+
+	updatePressedCountX11(pressed, x11Code(29), -1)
+	got := w.evaluateX11(pressed, active, armed, last)
+	if len(got) != 1 || got[0].Hotkey != "Ctrl+Shift+2" {
+		t.Fatalf("expected activation after full release, got %#v", got)
 	}
 }
 

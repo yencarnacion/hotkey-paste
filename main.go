@@ -804,9 +804,8 @@ func (w *hotkeyWatcher) evaluateX11(pressedCount map[int]int, active, armed []bo
 		if nowActive && !active[i] {
 			armed[i] = true
 		}
-		activate := !nowActive && active[i] && armed[i]
 		active[i] = nowActive
-		if !activate {
+		if nowActive || !armed[i] || !bindingReleasedX11(binding.Combo, pressedCount) {
 			continue
 		}
 		armed[i] = false
@@ -827,9 +826,8 @@ func (w *hotkeyWatcher) evaluateEvdev(pressedCount map[uint16]int, active, armed
 		if nowActive && !active[i] {
 			armed[i] = true
 		}
-		activate := !nowActive && active[i] && armed[i]
 		active[i] = nowActive
-		if !activate {
+		if nowActive || !armed[i] || !bindingReleasedEvdev(binding.Combo, pressedCount) {
 			continue
 		}
 		armed[i] = false
@@ -861,6 +859,20 @@ func bindingActiveX11(binding keyBinding, pressedCount map[int]int) bool {
 	return true
 }
 
+func bindingReleasedX11(binding keyBinding, pressedCount map[int]int) bool {
+	if pressedCount[x11Code(binding.trigger)] > 0 {
+		return false
+	}
+	for _, req := range binding.requirements {
+		for _, code := range req.anyOf {
+			if pressedCount[x11Code(code)] > 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func bindingActiveEvdev(binding keyBinding, pressedCount map[uint16]int) bool {
 	if pressedCount[binding.trigger] == 0 {
 		return false
@@ -875,6 +887,20 @@ func bindingActiveEvdev(binding keyBinding, pressedCount map[uint16]int) bool {
 		}
 		if !match {
 			return false
+		}
+	}
+	return true
+}
+
+func bindingReleasedEvdev(binding keyBinding, pressedCount map[uint16]int) bool {
+	if pressedCount[binding.trigger] > 0 {
+		return false
+	}
+	for _, req := range binding.requirements {
+		for _, code := range req.anyOf {
+			if pressedCount[code] > 0 {
+				return false
+			}
 		}
 	}
 	return true
