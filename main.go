@@ -14,9 +14,9 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"runtime"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -127,6 +127,8 @@ func run(args []string) error {
 		return initConfigCommand(args)
 	case "init-config":
 		return initConfigCommand(args)
+	case "update":
+		return updateSnippetsCommand(args)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -173,6 +175,30 @@ func initConfigCommand(args []string) error {
 
 	fmt.Printf("config initialized in %s\n", paths.configDir)
 	fmt.Printf("edit %s to change hotkeys or snippet files\n", paths.configFile)
+	return nil
+}
+
+func updateSnippetsCommand(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	paths, err := ensureConfig()
+	if err != nil {
+		return err
+	}
+
+	sourceSnippetDir, err := findDefaultSnippetSourceDir()
+	if err != nil {
+		return err
+	}
+	if err := copySnippetDir(paths.snippetDir, sourceSnippetDir, true); err != nil {
+		return err
+	}
+
+	fmt.Printf("snippets updated in %s\n", paths.snippetDir)
 	return nil
 }
 
@@ -247,11 +273,17 @@ func findDefaultSnippetSourceDir() (string, error) {
 }
 
 func seedSnippetDir(destDir, sourceDir string) error {
+	return copySnippetDir(destDir, sourceDir, false)
+}
+
+func copySnippetDir(destDir, sourceDir string, overwrite bool) error {
 	for _, digit := range defaultDigits {
 		name := digit + ".txt"
 		destPath := filepath.Join(destDir, name)
 		if _, err := os.Stat(destPath); err == nil {
-			continue
+			if !overwrite {
+				continue
+			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("stat %s: %w", destPath, err)
 		}

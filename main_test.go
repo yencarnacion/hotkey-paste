@@ -250,6 +250,52 @@ func TestSeedSnippetDirCopiesSourceContent(t *testing.T) {
 	}
 }
 
+func TestCopySnippetDirOverwriteControlsReplacement(t *testing.T) {
+	sourceDir := filepath.Join(t.TempDir(), "source")
+	destDir := filepath.Join(t.TempDir(), "dest")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("mkdir source: %v", err)
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+
+	for _, digit := range defaultDigits {
+		if err := os.WriteFile(filepath.Join(sourceDir, digit+".txt"), []byte("source-"+digit), 0o644); err != nil {
+			t.Fatalf("write source snippet: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(destDir, digit+".txt"), []byte("dest-"+digit), 0o644); err != nil {
+			t.Fatalf("write dest snippet: %v", err)
+		}
+	}
+
+	if err := copySnippetDir(destDir, sourceDir, false); err != nil {
+		t.Fatalf("copySnippetDir without overwrite returned error: %v", err)
+	}
+	for _, digit := range defaultDigits {
+		data, err := os.ReadFile(filepath.Join(destDir, digit+".txt"))
+		if err != nil {
+			t.Fatalf("read dest snippet: %v", err)
+		}
+		if string(data) != "dest-"+digit {
+			t.Fatalf("expected existing content to remain for %s, got %q", digit, string(data))
+		}
+	}
+
+	if err := copySnippetDir(destDir, sourceDir, true); err != nil {
+		t.Fatalf("copySnippetDir with overwrite returned error: %v", err)
+	}
+	for _, digit := range defaultDigits {
+		data, err := os.ReadFile(filepath.Join(destDir, digit+".txt"))
+		if err != nil {
+			t.Fatalf("read dest snippet: %v", err)
+		}
+		if string(data) != "source-"+digit {
+			t.Fatalf("expected source content to replace dest for %s, got %q", digit, string(data))
+		}
+	}
+}
+
 func TestRunInitSeedsConfigFromLocalSnippets(t *testing.T) {
 	tempDir := t.TempDir()
 	snippetDir := filepath.Join(tempDir, "snippets")
@@ -287,6 +333,58 @@ func TestRunInitSeedsConfigFromLocalSnippets(t *testing.T) {
 		}
 		if string(data) != "from-local-"+digit {
 			t.Fatalf("unexpected initialized content for %s: %q", digit, string(data))
+		}
+	}
+}
+
+func TestRunUpdateOverwritesConfigSnippetsFromLocalSnippets(t *testing.T) {
+	tempDir := t.TempDir()
+	sourceSnippetDir := filepath.Join(tempDir, "snippets")
+	if err := os.MkdirAll(sourceSnippetDir, 0o755); err != nil {
+		t.Fatalf("mkdir snippets: %v", err)
+	}
+
+	for _, digit := range defaultDigits {
+		if err := os.WriteFile(filepath.Join(sourceSnippetDir, digit+".txt"), []byte("from-local-"+digit), 0o644); err != nil {
+			t.Fatalf("write source snippet: %v", err)
+		}
+	}
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(oldWD)
+	}()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	configHome := filepath.Join(tempDir, "config-home")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if err := run([]string{"init"}); err != nil {
+		t.Fatalf("run init returned error: %v", err)
+	}
+
+	configSnippetDir := filepath.Join(configHome, appName, "snippets")
+	for _, digit := range defaultDigits {
+		if err := os.WriteFile(filepath.Join(configSnippetDir, digit+".txt"), []byte("existing-"+digit), 0o644); err != nil {
+			t.Fatalf("write existing config snippet: %v", err)
+		}
+	}
+
+	if err := run([]string{"update"}); err != nil {
+		t.Fatalf("run update returned error: %v", err)
+	}
+
+	for _, digit := range defaultDigits {
+		data, err := os.ReadFile(filepath.Join(configSnippetDir, digit+".txt"))
+		if err != nil {
+			t.Fatalf("read updated snippet: %v", err)
+		}
+		if string(data) != "from-local-"+digit {
+			t.Fatalf("unexpected updated content for %s: %q", digit, string(data))
 		}
 	}
 }

@@ -31,6 +31,12 @@ Initialize config and snippet files:
 ./hotkey-paste init
 ```
 
+Overwrite the config snippets with the project-local `./snippets` files:
+
+```bash
+./hotkey-paste update
+```
+
 Run it:
 
 ```bash
@@ -63,6 +69,7 @@ On first run the program creates:
 - `~/.config/hotkey-paste/snippets/1.txt` through `~/.config/hotkey-paste/snippets/0.txt`
 
 Missing snippet files are initialized from the project-local `./snippets` directory.
+Run `./hotkey-paste update` to overwrite the config snippet files with the current project-local `./snippets` contents.
 
 Edit `config.json` to change hotkeys or point them at different text files. Relative paths are resolved from `~/.config/hotkey-paste/`.
 
