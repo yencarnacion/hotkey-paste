@@ -1016,7 +1016,12 @@ func resolveOutputMethodWith(text, method string, underWSL, onWindows, hasWindow
 		if onWindows {
 			return "", errors.New("no supported paste backend found; install powershell.exe or pwsh.exe")
 		}
-		if utf8.RuneCountInString(text) > largeSnippetRunes {
+		// Multiline snippets generate a dense stream of synthetic X11 key
+		// events when typed directly.  Besides being slow, that can leave the
+		// desktop's input handling wedged until xdotool exits.  Use the
+		// clipboard for formatted text even when it is short; keep direct
+		// typing for short single-line snippets, which is useful in terminals.
+		if strings.Contains(text, "\n") || utf8.RuneCountInString(text) > largeSnippetRunes {
 			if _, err := resolveClipboardBackendWith(commandExists); err == nil {
 				return "clipboard", nil
 			}
@@ -1097,11 +1102,7 @@ func typeChunk(method, chunk string, longText bool) error {
 		}
 		return nil
 	case "xdotool":
-		delay := "0"
-		if longText {
-			delay = "1"
-		}
-		out, err := exec.Command("xdotool", "type", "--clearmodifiers", "--delay", delay, chunk).CombinedOutput()
+		out, err := exec.Command("xdotool", xdotoolTypeArgs(chunk, longText)...).CombinedOutput()
 		if err != nil {
 			return commandError("xdotool", err, out)
 		}
@@ -1109,6 +1110,18 @@ func typeChunk(method, chunk string, longText bool) error {
 	default:
 		return fmt.Errorf("unsupported output method %q", method)
 	}
+}
+
+func xdotoolTypeArgs(text string, longText bool) []string {
+	delay := "0"
+	if longText {
+		delay = "1"
+	}
+
+	// Hotkeys fire only after every key in the binding is released.
+	// xdotool's modifier save/restore can otherwise restore Ctrl or Alt as
+	// logically pressed, breaking desktop clicks and terminal prefixes.
+	return []string{"type", "--delay", delay, "--", text}
 }
 
 func splitTextByRuneCount(text string, maxRunes int) []string {
@@ -1280,10 +1293,14 @@ func clipboardPasteCommand(backend clipboardBackend) *exec.Cmd {
 	case clipboardBackendWayland:
 		return exec.Command("wtype", "-M", "ctrl", "v", "-m", "ctrl")
 	case clipboardBackendX11:
-		return exec.Command("xdotool", "key", "--clearmodifiers", "ctrl+v")
+		return exec.Command("xdotool", xdotoolPasteArgs()...)
 	default:
 		return nil
 	}
+}
+
+func xdotoolPasteArgs() []string {
+	return []string{"key", "ctrl+v"}
 }
 
 func commandError(name string, err error, out []byte) error {

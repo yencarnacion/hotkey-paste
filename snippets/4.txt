@@ -1,0 +1,11 @@
+Analyze the provided text and produce a brief summary in this format:
+
+### Key Takeaway
+
+State the single most important takeaway in one sentence.
+
+### Summary
+
+* Include only the most important facts and ideas.
+* Use 3–5 concise bullet points.
+* Avoid repetition, unnecessary detail, and emojis.

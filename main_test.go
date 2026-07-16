@@ -38,6 +38,54 @@ func TestSplitTextByRuneCount(t *testing.T) {
 	}
 }
 
+func TestXdotoolTypeDoesNotManipulateModifierState(t *testing.T) {
+	got := xdotoolTypeArgs("-sample", false)
+	want := []string{"type", "--delay", "0", "--", "-sample"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected xdotool arguments: %#v", got)
+	}
+}
+
+func TestXdotoolLongTypeUsesDelayWithoutManipulatingModifiers(t *testing.T) {
+	got := xdotoolTypeArgs("sample", true)
+	want := []string{"type", "--delay", "1", "--", "sample"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected xdotool arguments: %#v", got)
+	}
+}
+
+func TestXdotoolPasteDoesNotManipulateModifierState(t *testing.T) {
+	got := xdotoolPasteArgs()
+	want := []string{"key", "ctrl+v"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected xdotool arguments: %#v", got)
+	}
+}
+
+func TestAutoUsesClipboardForShortMultilineSnippet(t *testing.T) {
+	method, err := resolveOutputMethodWith("first line\nsecond line", "auto", false, false, false, func(name string) bool {
+		return name == "xclip" || name == "xdotool"
+	})
+	if err != nil {
+		t.Fatalf("resolveOutputMethodWith returned error: %v", err)
+	}
+	if method != "clipboard" {
+		t.Fatalf("expected clipboard for multiline snippet, got %q", method)
+	}
+}
+
+func TestAutoKeepsDirectTypingForShortSingleLineSnippet(t *testing.T) {
+	method, err := resolveOutputMethodWith("short snippet", "auto", false, false, false, func(name string) bool {
+		return name == "xclip" || name == "xdotool"
+	})
+	if err != nil {
+		t.Fatalf("resolveOutputMethodWith returned error: %v", err)
+	}
+	if method != "xdotool" {
+		t.Fatalf("expected xdotool for short single-line snippet, got %q", method)
+	}
+}
+
 func TestBindingActiveEvdev(t *testing.T) {
 	combo, err := parseBinding("Ctrl+Alt+1")
 	if err != nil {
