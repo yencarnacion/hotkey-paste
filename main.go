@@ -34,6 +34,7 @@ const (
 	maxTypingChunkRunes = 180
 	largeSnippetRunes   = 400
 	typingChunkPause    = 10 * time.Millisecond
+	commandTimeout      = 30 * time.Second
 )
 
 var (
@@ -55,15 +56,17 @@ type config struct {
 }
 
 type binding struct {
-	Hotkey string `json:"hotkey,omitempty"`
-	Key    string `json:"key,omitempty"`
-	File   string `json:"file"`
+	Hotkey  string   `json:"hotkey,omitempty"`
+	Key     string   `json:"key,omitempty"`
+	File    string   `json:"file,omitempty"`
+	Command []string `json:"command,omitempty"`
 }
 
 type runtimeBinding struct {
-	Hotkey string
-	File   string
-	Combo  keyBinding
+	Hotkey  string
+	File    string
+	Command []string
+	Combo   keyBinding
 }
 
 type hotkeyWatcher struct {
@@ -331,8 +334,8 @@ func loadConfig(configPath, configDir string) (config, error) {
 		if hotkeySpec(*b) == "" {
 			return config{}, fmt.Errorf("missing hotkey for binding %q in %s", b.File, configPath)
 		}
-		if b.File == "" {
-			return config{}, fmt.Errorf("missing file for hotkey %q in %s", hotkeySpec(*b), configPath)
+		if (b.File == "") == (b.Command == nil) {
+			return config{}, fmt.Errorf("hotkey %q must specify exactly one of file or command in %s", hotkeySpec(*b), configPath)
 		}
 
 		canonical, _, err := parseHotkey(hotkeySpec(*b))
@@ -344,11 +347,29 @@ func loadConfig(configPath, configDir string) (config, error) {
 		}
 		seen[canonical] = struct{}{}
 
-		resolved, err := resolvePath(configDir, b.File)
-		if err != nil {
-			return config{}, err
+		if b.Command != nil {
+			if len(b.Command) == 0 || strings.TrimSpace(b.Command[0]) == "" {
+				return config{}, fmt.Errorf("missing command executable for hotkey %q", canonical)
+			}
+			for _, arg := range b.Command {
+				if strings.ContainsRune(arg, '\x00') {
+					return config{}, fmt.Errorf("command for hotkey %q contains a NUL character", canonical)
+				}
+			}
+			if strings.ContainsAny(b.Command[0], `/\`) {
+				resolved, err := resolvePath(configDir, b.Command[0])
+				if err != nil {
+					return config{}, err
+				}
+				b.Command[0] = resolved
+			}
+		} else {
+			resolved, err := resolvePath(configDir, b.File)
+			if err != nil {
+				return config{}, err
+			}
+			b.File = resolved
 		}
-		b.File = resolved
 	}
 
 	return cfg, nil
@@ -397,7 +418,7 @@ func runHotkeyLoop(cfg config, logger *log.Logger) error {
 			}
 			return err
 		case binding := <-events:
-			if err := pasteSnippet(binding, logger); err != nil {
+			if err := executeBinding(ctx, binding, logger); err != nil {
 				logger.Printf("hotkey %s failed: %v", binding.Hotkey, err)
 			}
 		}
@@ -412,9 +433,10 @@ func compileBindings(cfg config) ([]runtimeBinding, error) {
 			return nil, err
 		}
 		result = append(result, runtimeBinding{
-			Hotkey: hotkey,
-			File:   entry.File,
-			Combo:  combo,
+			Hotkey:  hotkey,
+			File:    entry.File,
+			Command: append([]string(nil), entry.Command...),
+			Combo:   combo,
 		})
 	}
 	return result, nil
@@ -459,6 +481,9 @@ func parseHotkey(spec string) (string, keyBinding, error) {
 	}
 	if len(keyToken) == 1 {
 		keyToken = strings.ToUpper(keyToken)
+	}
+	if normalizeKeyToken(keyToken) == "KEY_ENTER" {
+		keyToken = "Enter"
 	}
 
 	combo, err := parseBinding(spec)
@@ -962,6 +987,36 @@ func updatePressedCountEvdev(pressedCount map[uint16]int, code uint16, value int
 			delete(pressedCount, code)
 		}
 	}
+}
+
+func executeBinding(ctx context.Context, binding runtimeBinding, logger *log.Logger) error {
+	if len(binding.Command) == 0 {
+		return pasteSnippet(binding, logger)
+	}
+
+	// Watchers wait for the full hotkey release; allow it to reach other apps
+	// before running the command, just as the snippet path does before pasting.
+	timer := time.NewTimer(modifierReleaseWait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+
+	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(commandCtx, binding.Command[0], binding.Command[1:]...)
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	if commandCtx.Err() != nil {
+		return fmt.Errorf("command for %s: %w", binding.Hotkey, commandCtx.Err())
+	}
+	if err != nil {
+		return commandError(binding.Command[0], err, out)
+	}
+	logger.Printf("ran command for %s", binding.Hotkey)
+	return nil
 }
 
 func pasteSnippet(binding runtimeBinding, logger *log.Logger) error {
@@ -1553,6 +1608,9 @@ func normalizeKeyToken(raw string) string {
 	if s == "" {
 		return ""
 	}
+	if s == "RETURN" || s == "KEY_RETURN" {
+		return "KEY_ENTER"
+	}
 	if s == "$" {
 		return "KEY_4"
 	}
@@ -1699,6 +1757,8 @@ func windowsVirtualKey(token string) (uint32, error) {
 	}
 
 	switch key {
+	case "ENTER", "RETURN", "KEY_ENTER", "KEY_RETURN":
+		return 0x0D, nil
 	case `\`:
 		return 0xDC, nil
 	case "BACKSLASH":
@@ -1826,6 +1886,7 @@ if ($hasPrevious) {
 `
 
 var keyNameMap = map[string]uint16{
+	"KEY_ENTER":      28,
 	"KEY_0":          11,
 	"KEY_1":          2,
 	"KEY_2":          3,
